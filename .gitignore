@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Logs & temp output
+crash_log.txt
+error.txt
+run_output.txt
+run_output2.txt
+
+# IDE / editor
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Build / dist
+dist/
+build/
+*.egg-info/
