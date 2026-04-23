@@ -6,8 +6,9 @@ Royale Online — Ölüm Dedektörü & Oto-Av Botu
 • Tüm ayarlar GUI üzerinden yapılır; hiç kod değişikliği gerekmez.
 
 Gereksinimler:
-  pip install pillow pytesseract pyautogui pynput
-  brew install tesseract tesseract-lang   (macOS)
+  pip install pillow pytesseract pyautogui pynput mss pygetwindow
+  macOS : brew install tesseract tesseract-lang
+  Windows: https://github.com/UB-Mannheim/tesseract/wiki (installer)
 """
 
 import tkinter as tk
@@ -16,10 +17,12 @@ import threading
 import time
 import queue
 import json
-from macro_recorder import MacroRecorder
-import subprocess
 import sys
 import os
+from macro_recorder import MacroRecorder
+
+IS_WINDOWS = sys.platform == "win32"
+IS_MAC     = sys.platform == "darwin"
 
 try:
     from Quartz import (
@@ -38,15 +41,23 @@ try:
 except ImportError:
     APPKIT_OK = False
 
+# Windows: pygetwindow for window listing & focus
+try:
+    import pygetwindow as pgw
+    PGWIN_OK = True
+except ImportError:
+    pgw = None
+    PGWIN_OK = False
+
 try:
     import pyautogui
-    pyautogui.FAILSAFE = True  # Sol-üst köşeye mouse götürmek programı durdurur
-    pyautogui.PAUSE     = 0.05
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE    = 0.05
 except ImportError:
     pyautogui = None
 
 try:
-    from PIL import Image, ImageGrab, ImageEnhance, ImageFilter, ImageChops, ImageStat
+    from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 except ImportError:
     Image = ImageGrab = ImageEnhance = ImageFilter = None
 
@@ -61,18 +72,23 @@ try:
 except ImportError:
     kb_module = kb_ctrl = None
 
-# --- Tesseract Path Discovery ---
+# --- Tesseract Path Discovery (macOS + Windows) ---
 if pytesseract:
-    import os
-    # Common paths for Tesseract on macOS
-    tess_paths = [
-        "/opt/homebrew/bin/tesseract",      # M1/M2/M3 Mac
-        "/usr/local/bin/tesseract",         # Intel Mac
-        "/usr/bin/tesseract"
-    ]
-    for p in tess_paths:
-        if os.path.exists(p):
-            pytesseract.pytesseract.tesseract_cmd = p
+    _tess_candidates = []
+    if IS_MAC:
+        _tess_candidates = [
+            "/opt/homebrew/bin/tesseract",   # M1/M2/M3 Mac
+            "/usr/local/bin/tesseract",      # Intel Mac
+            "/usr/bin/tesseract",
+        ]
+    elif IS_WINDOWS:
+        _tess_candidates = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+    for _p in _tess_candidates:
+        if os.path.exists(_p):
+            pytesseract.pytesseract.tesseract_cmd = _p
             break
 
 # ── Renk paleti ────────────────────────────────────────────────────────────────
@@ -90,10 +106,18 @@ FG_DIM   = "#b0bec5"
 BORDER   = "#2a3a5a"
 GOLD     = "#fbbf24"
 
-FONT    = ("SF Pro Display", 13)
-FONT_SM = ("SF Pro Display", 11)
-FONT_LG = ("SF Pro Display", 18, "bold")
-FONT_XL = ("SF Pro Display", 28, "bold")
+# ── Font (platform-aware) ────────────────────────────────────────────────────
+if IS_MAC:
+    _FONT_FAMILY = "SF Pro Display"
+elif IS_WINDOWS:
+    _FONT_FAMILY = "Segoe UI"
+else:
+    _FONT_FAMILY = "Ubuntu"
+
+FONT    = (_FONT_FAMILY, 13)
+FONT_SM = (_FONT_FAMILY, 11)
+FONT_LG = (_FONT_FAMILY, 18, "bold")
+FONT_XL = (_FONT_FAMILY, 28, "bold")
 
 
 def make_btn(parent, *, text, bg, fg="black", active_bg=None,
@@ -147,49 +171,82 @@ def check_dependencies():
 
 
 def get_active_app_name() -> str:
-    """Ön plandaki uygulamanın adını döndürür (macOS NSWorkspace)."""
-    if not APPKIT_OK:
-        return ""
-    try:
-        info = NSWorkspace.sharedWorkspace().activeApplication()
-        return (info or {}).get("NSApplicationName", "")
-    except Exception:
-        return ""
+    """Ön plandaki uygulamanın adını döndürür (platform-aware)."""
+    # macOS
+    if APPKIT_OK:
+        try:
+            info = NSWorkspace.sharedWorkspace().activeApplication()
+            return (info or {}).get("NSApplicationName", "")
+        except Exception:
+            return ""
+    # Windows
+    if IS_WINDOWS and PGWIN_OK:
+        try:
+            w = pgw.getActiveWindow()
+            return w.title if w else ""
+        except Exception:
+            return ""
+    return ""
 
 
-# ── Pencere listesi (macOS Quartz) ───────────────────────────────────────────
+# ── Pencere listesi (platform-aware) ────────────────────────────────────────
 def get_windows():
     """
     Tüm görünür pencereleri döndürür.
     Her eleman: {"app": str, "title": str, "x": int, "y": int, "w": int, "h": int}
+    macOS: Quartz / Windows: pygetwindow
     """
-    if not QUARTZ_OK:
-        return []
-    window_list = CGWindowListCopyWindowInfo(
-        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-        kCGNullWindowID,
-    )
-    results = []
-    for w in window_list:
-        # Sadece gerçek, boyutlu pencereleri al
-        bounds = w.get("kCGWindowBounds", {})
-        width  = int(bounds.get("Width",  0))
-        height = int(bounds.get("Height", 0))
-        if width < 50 or height < 50:
-            continue
-        layer = w.get("kCGWindowLayer", 999)
-        if layer > 0:          # masaüstü öğelerini atla
-            continue
-        app   = w.get("kCGWindowOwnerName", "?") or "?"
-        title = w.get("kCGWindowName",      "")  or ""
-        x     = int(bounds.get("X", 0))
-        y     = int(bounds.get("Y", 0))
-        wid   = int(w.get("kCGWindowNumber", 0))
-        results.append({"app": app, "title": title,
-                        "x": x, "y": y, "w": width, "h": height, "wid": wid})
-    # Uygulama adına göre sırala
-    results.sort(key=lambda r: r["app"].lower())
-    return results
+    # ── macOS (Quartz) ───────────────────────────────────────────────────────
+    if QUARTZ_OK:
+        window_list = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+        results = []
+        for w in window_list:
+            bounds = w.get("kCGWindowBounds", {})
+            width  = int(bounds.get("Width",  0))
+            height = int(bounds.get("Height", 0))
+            if width < 50 or height < 50:
+                continue
+            layer = w.get("kCGWindowLayer", 999)
+            if layer > 0:
+                continue
+            app   = w.get("kCGWindowOwnerName", "?") or "?"
+            title = w.get("kCGWindowName",      "")  or ""
+            x     = int(bounds.get("X", 0))
+            y     = int(bounds.get("Y", 0))
+            wid   = int(w.get("kCGWindowNumber", 0))
+            results.append({"app": app, "title": title,
+                            "x": x, "y": y, "w": width, "h": height, "wid": wid})
+        results.sort(key=lambda r: r["app"].lower())
+        return results
+
+    # ── Windows (pygetwindow) ────────────────────────────────────────────────
+    if IS_WINDOWS and PGWIN_OK:
+        results = []
+        try:
+            for win in pgw.getAllWindows():
+                if not win.visible:
+                    continue
+                if win.width < 50 or win.height < 50:
+                    continue
+                title = win.title or ""
+                results.append({
+                    "app":   title,
+                    "title": title,
+                    "x":     win.left,
+                    "y":     win.top,
+                    "w":     win.width,
+                    "h":     win.height,
+                    "_win_obj": win,   # kept for focus use
+                })
+        except Exception:
+            pass
+        results.sort(key=lambda r: r["app"].lower())
+        return results
+
+    return []
 
 
 # ── Ekran yakalama & OCR ──────────────────────────────────────────────────────
@@ -484,17 +541,16 @@ class RoyaleBot:
     def _focus_win(self, win: dict) -> bool:
         """
         Belirtilen pencereyi ön plana alır ve focus'u doğrular.
-        1) AppKit ile process'i aktive et (uygulama seviyesi)
-        2) Pencerenin sol-üst köşesine tıkla (pencere seviyesi)
-        3) get_active_app_name() ile aktif uygulamayı doğrula
+        macOS : AppKit process aktivasyonu + köşe tıklaması
+        Windows: pygetwindow.activate() + köşe tıklaması
         True → focus başarılı / doğrulanamadı ama devam edilebilir
         False → app adı biliniyor ve yanlış app ön planda
         """
         if pyautogui is None:
-            return True  # kontrol edilemiyor, devam et
+            return True
         app_name = win.get("app", "")
 
-        # 1) AppKit ile process aktivasyonu
+        # 1a) macOS — AppKit process aktivasyonu
         if APPKIT_OK and app_name:
             try:
                 from AppKit import NSWorkspace
@@ -507,8 +563,21 @@ class RoyaleBot:
             except Exception:
                 pass
 
-        # 2) Pencerenin köşesine tıkla — bu adım aynı app'ın doğru
-        #    penceresini ön plana çeker (AppKit sadece process'i aktive eder)
+        # 1b) Windows — pygetwindow activate
+        elif IS_WINDOWS and PGWIN_OK:
+            try:
+                win_obj = win.get("_win_obj")
+                if win_obj:
+                    win_obj.activate()
+                elif app_name:
+                    wins = pgw.getWindowsWithTitle(app_name)
+                    if wins:
+                        wins[0].activate()
+                time.sleep(0.15)
+            except Exception:
+                pass
+
+        # 2) Köşeye tıkla — doğru pencereyi öne getirir
         try:
             cx = win["x"] + 5
             cy = win["y"] + 5
@@ -517,11 +586,14 @@ class RoyaleBot:
         except Exception:
             pass
 
-        # 3) Doğrulama — aktif uygulama beklenen mi?
+        # 3) Doğrulama
         if app_name:
             active = get_active_app_name()
+            # Windows'ta title bazlı eşleştirme (app_name = pencere başlığı)
+            if IS_WINDOWS:
+                return app_name in active or active in app_name
             return active == app_name
-        return True  # app_name bilinmiyorsa doğrulama yapılamaz
+        return True
 
 
 

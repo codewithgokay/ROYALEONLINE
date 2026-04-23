@@ -1,15 +1,8 @@
 """
 MacroRecorder — Mouse (hold dahil) & Klavye Kaydedici
 ======================================================
-macOS Tahoe (26) — sıfır izin, sıfır crash.
-
-Kayıt yöntemi:
-  • Mouse buton  : CGEventSourceButtonState()  — HID ham durum, thread-safe
-  • Mouse pozisyon: CGEventCreate / CGEventGetLocation — thread-safe
-  • Klavye       : CGEventSourceKeyState()     — HID ham durum, thread-safe
-
-Bunların hiçbiri pynput, NSEvent veya TSM kullanmaz.
-Input Monitoring / Accessibility izni GEREKMEZ.
+macOS : CoreGraphics HID (izin gerektirmez, thread-safe)
+Windows: pynput listener (Input Monitoring gerektirmez)
 
 Olay tipleri (JSON):
   mousedown  → {type, x, y, button, t}   hold başlangıcı
@@ -20,14 +13,19 @@ Olay tipleri (JSON):
 Oynatma:
   mousedown  → pyautogui.mouseDown()
   mouseup    → pyautogui.mouseUp()
-  keydown    → pyautogui.press()  (kısa basış için yeterli)
+  keydown    → pyautogui.keyDown()
+  keyup      → pyautogui.keyUp()
   click      → pyautogui.click()  (eski format uyumu)
 """
 
+import sys
 import time
 import json
 import ctypes
 import threading
+
+IS_WINDOWS = sys.platform == "win32"
+IS_MAC     = sys.platform == "darwin"
 
 # ── pyautogui ─────────────────────────────────────────────────────────────────
 try:
@@ -118,12 +116,49 @@ _KEYCODE_MAP: dict[int, str] = {
 # Oynatmada basılmayacak tuşlar (modifier tek başına anlamsız)
 _NO_PLAY = frozenset({'shift', 'ctrl', 'alt', 'command'})
 
+# ── pynput — Windows / cross-platform fallback ────────────────────────────
+try:
+    from pynput import mouse as _pynput_mouse, keyboard as _pynput_kb
+    PYNPUT_OK = True
+except ImportError:
+    _pynput_mouse = _pynput_kb = None
+    PYNPUT_OK = False
+
+# pynput key → pyautogui key name
+def _pynput_key_name(key) -> str:
+    """pynput Key/KeyCode nesnesini pyautogui tuş ismine çevirir."""
+    try:
+        # Normal karakter tuşu
+        if hasattr(key, 'char') and key.char:
+            return key.char.lower()
+    except Exception:
+        pass
+    try:
+        # Özel tuş (Key.space, Key.enter, ...)
+        name = key.name
+        _MAP = {
+            'space': 'space', 'enter': 'enter', 'tab': 'tab',
+            'backspace': 'backspace', 'delete': 'delete', 'escape': 'escape',
+            'up': 'up', 'down': 'down', 'left': 'left', 'right': 'right',
+            'home': 'home', 'end': 'end', 'page_up': 'pageup',
+            'page_down': 'pagedown',
+            'f1':'f1','f2':'f2','f3':'f3','f4':'f4','f5':'f5','f6':'f6',
+            'f7':'f7','f8':'f8','f9':'f9','f10':'f10','f11':'f11','f12':'f12',
+            'shift': 'shift', 'shift_l': 'shift', 'shift_r': 'shift',
+            'ctrl': 'ctrl', 'ctrl_l': 'ctrl', 'ctrl_r': 'ctrl',
+            'alt': 'alt', 'alt_l': 'alt', 'alt_r': 'alt',
+            'cmd': 'command', 'cmd_l': 'command', 'cmd_r': 'command',
+        }
+        return _MAP.get(name, name)
+    except Exception:
+        return ''
+
 
 class MacroRecorder:
     """
     Mouse (hold dahil) ve klavye tuşlarını kaydeder ve oynatır.
-    Tüm platform erişimi CoreGraphics HID katmanından yapılır;
-    hiçbir özel izin gerekmez.
+    macOS : CoreGraphics HID (izin gerektirmez)
+    Windows: pynput listener (cross-platform)
     """
 
     def __init__(self):
@@ -131,40 +166,99 @@ class MacroRecorder:
         self.recording    = False
         self._start_time  = 0.0
         self._poll_thread = None
+        self._pynput_listeners = []   # Windows pynput listeners
 
     # ── Kayıt başlat / durdur ─────────────────────────────────────────────────
     def start_recording(self):
-        if not _CG_OK:
-            raise RuntimeError(
-                "CoreGraphics ctypes yüklenemedi — macOS kurulumunu kontrol edin.")
         self.events      = []
         self.recording   = True
         self._start_time = time.time()
 
-        self._poll_thread = threading.Thread(
-            target=self._poll_all, daemon=True)
-        self._poll_thread.start()
+        if _CG_OK:
+            # macOS: CoreGraphics HID polling
+            self._poll_thread = threading.Thread(
+                target=self._poll_all, daemon=True)
+            self._poll_thread.start()
+        elif PYNPUT_OK:
+            # Windows / fallback: pynput listeners
+            self._start_pynput_recording()
+        else:
+            self.recording = False
+            raise RuntimeError(
+                "Kayıt başlatılamadı — CoreGraphics (macOS) veya pynput (Windows) gerekli.\n"
+                "Windows için: pip install pynput")
 
     def stop_recording(self):
         self.recording = False
+        # pynput listenerları durdur
+        for listener in self._pynput_listeners:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+        self._pynput_listeners.clear()
         # Olayları kronolojik sıraya koy
         self.events.sort(key=lambda e: e["t"])
 
+    # ── pynput backend (Windows) ──────────────────────────────────────────────
+    def _start_pynput_recording(self):
+        """pynput mouse + keyboard listenerları başlatır (Windows/Linux)."""
+        start = self._start_time
+
+        def on_click(x, y, button, pressed):
+            if not self.recording:
+                return False   # listener'ı durdur
+            btn_name = "right" if "right" in str(button).lower() else "left"
+            ev_type  = "mousedown" if pressed else "mouseup"
+            self.events.append({
+                "type": ev_type, "x": x, "y": y,
+                "button": btn_name,
+                "t": round(time.time() - start, 3),
+            })
+
+        def on_press(key):
+            if not self.recording:
+                return False
+            name = _pynput_key_name(key)
+            if name:
+                self.events.append({
+                    "type": "keydown", "key": name,
+                    "t": round(time.time() - start, 3),
+                })
+
+        def on_release(key):
+            if not self.recording:
+                return False
+            name = _pynput_key_name(key)
+            if name:
+                self.events.append({
+                    "type": "keyup", "key": name,
+                    "t": round(time.time() - start, 3),
+                })
+
+        ml = _pynput_mouse.Listener(on_click=on_click)
+        kl = _pynput_kb.Listener(on_press=on_press, on_release=on_release)
+        ml.start()
+        kl.start()
+        self._pynput_listeners = [ml, kl]
+
     # ── Yardımcı: mouse pozisyonu ─────────────────────────────────────────────
     def _get_mouse_pos(self) -> tuple[int, int]:
-        """Thread-safe: CGEventCreate + CGEventGetLocation."""
-        try:
-            ev_ref = _cg.CGEventCreate(None)
-            pos    = _cg.CGEventGetLocation(ev_ref)
-            _cf.CFRelease(ev_ref)
-            return int(pos.x), int(pos.y)
-        except Exception:
-            if pyautogui:
-                try:
-                    p = pyautogui.position()
-                    return int(p.x), int(p.y)
-                except Exception:
-                    pass
+        """Thread-safe mouse position (CoreGraphics on macOS, pyautogui elsewhere)."""
+        if _CG_OK:
+            try:
+                ev_ref = _cg.CGEventCreate(None)
+                pos    = _cg.CGEventGetLocation(ev_ref)
+                _cf.CFRelease(ev_ref)
+                return int(pos.x), int(pos.y)
+            except Exception:
+                pass
+        if pyautogui:
+            try:
+                p = pyautogui.position()
+                return int(p.x), int(p.y)
+            except Exception:
+                pass
         return 0, 0
 
     # ── Ana polling döngüsü ───────────────────────────────────────────────────
