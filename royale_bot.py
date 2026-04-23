@@ -24,6 +24,19 @@ from macro_recorder import MacroRecorder
 IS_WINDOWS = sys.platform == "win32"
 IS_MAC     = sys.platform == "darwin"
 
+# ── Windows DPI Scaling fix ───────────────────────────────────────────────────
+# MUST run before any screen capture or GUI starts.
+# Without this, 125%/150% DPI scaling makes mss capture the wrong region.
+if IS_WINDOWS:
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()   # Fallback (Win Vista+)
+        except Exception:
+            pass
+
 try:
     from Quartz import (
         CGWindowListCopyWindowInfo,
@@ -90,6 +103,19 @@ if pytesseract:
         if os.path.exists(_p):
             pytesseract.pytesseract.tesseract_cmd = _p
             break
+
+# Runtime verify: actually call tesseract and check Turkish language pack
+_TESS_OK  = False
+_TESS_TUR = False
+if pytesseract:
+    try:
+        pytesseract.get_tesseract_version()
+        _TESS_OK = True
+        # Check Turkish language pack
+        langs = pytesseract.get_languages(config='')
+        _TESS_TUR = 'tur' in langs
+    except Exception:
+        pass
 
 # ── Renk paleti ────────────────────────────────────────────────────────────────
 BG       = "#0f0f1a"
@@ -168,6 +194,54 @@ def check_dependencies():
     if kb_module is None:
         missing.append("pynput")
     return missing
+
+
+def get_startup_diagnostics() -> list:
+    """Bot açılışında Log sekmesine yazılacak sistem bilgisi."""
+    lines = []
+    lines.append(f"💻 Platform  : {sys.platform} | Python {sys.version.split()[0]}")
+
+    # Tesseract
+    tess_cmd = "N/A"
+    if pytesseract:
+        tess_cmd = getattr(pytesseract.pytesseract, "tesseract_cmd", "N/A")
+    if _TESS_OK:
+        lines.append(f"✅ Tesseract : {tess_cmd}")
+        if _TESS_TUR:
+            lines.append("✅ Türkçe OCR: Dil paketi kurulu — ölüm ekranı tanınabilir")
+        else:
+            lines.append("⚠️ Türkçe OCR: DİL PAKETİ EKSİK! Ölüm metni tanınamaz.")
+            lines.append("   → Tesseract'ı tekrar kur, kurulumda 'Turkish' seç!")
+    else:
+        lines.append("❌ Tesseract : BULUNAMADI — OCR çalışmaz, ölüm tanınamaz!")
+        if IS_WINDOWS:
+            lines.append("   → https://github.com/UB-Mannheim/tesseract/wiki")
+        else:
+            lines.append("   → brew install tesseract tesseract-lang")
+
+    # DPI (Windows)
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            dpi = ctypes.windll.user32.GetDpiForSystem()
+            scale = round(dpi / 96 * 100)
+            status = "✅" if scale == 100 else "⚠️"
+            lines.append(f"{status} Windows DPI: {dpi} ({scale}%) — DPI-Aware mod aktif")
+            if scale != 100:
+                lines.append("   → DPI!=100% tespit edildi. Koordinatlar otomatik düzeltildi.")
+        except Exception:
+            pass
+
+    # Screen capture
+    lines.append(f"📸 Ekran yakalama: {'mss ✅' if MSS_OK else 'PIL ImageGrab (yedek)'}")
+
+    # Window picker
+    if IS_WINDOWS:
+        lines.append(f"🪟 Pencere listesi: {'pygetwindow ✅' if PGWIN_OK else 'YOK — pip install pygetwindow'}")
+    else:
+        lines.append(f"🪟 Pencere listesi: {'Quartz (macOS) ✅' if QUARTZ_OK else 'YOK'}")
+
+    return lines
 
 
 def get_active_app_name() -> str:
@@ -252,7 +326,7 @@ def get_windows():
 # ── Ekran yakalama & OCR ──────────────────────────────────────────────────────
 try:
     import mss as _mss_module
-    _mss_instance = _mss_module.mss()
+    _mss_instance = _mss_module.MSS()   # mss.mss() deprecated → use MSS()
     MSS_OK = True
 except Exception:
     _mss_instance = None
@@ -285,16 +359,22 @@ def preprocess_image(img):
 
 
 def ocr_image(img, lang="tur"):
-    """Görüntüden metin çıkar."""
-    try:
-        text = pytesseract.image_to_string(img, lang=lang, config="--psm 6")
-        return text.lower().strip()
-    except Exception:
+    """Görüntüden metin çıkar. Turkce yoksa Latin+eng ile yeniden dener."""
+    if pytesseract is None:
+        return ""
+    # Önce Turkish ile dene
+    if _TESS_TUR:
         try:
-            text = pytesseract.image_to_string(img, config="--psm 6")
+            text = pytesseract.image_to_string(img, lang="tur+eng", config="--psm 6")
             return text.lower().strip()
         except Exception:
-            return ""
+            pass
+    # Turkish yoksa veya hata varsa: sadece eng
+    try:
+        text = pytesseract.image_to_string(img, config="--psm 6")
+        return text.lower().strip()
+    except Exception:
+        return ""
 
 
 def find_text_position(img, raw_img, x_offset, y_offset, target_texts):
@@ -625,11 +705,22 @@ class App(tk.Tk):
         self._build_ui()
         self._poll_log()
 
+        # Başlangıç tanılama logları — Log sekmesinde görünür
+        self.after(200, self._log_startup_diagnostics)
+
         # Merkeze al
         self.update_idletasks()
         w, h = self.winfo_width(), self.winfo_height()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    def _log_startup_diagnostics(self):
+        """Başlangıç tanılama bilgilerini Log sekmesine yazar."""
+        self._append_log("─" * 48)
+        self._append_log("🔧 SİSTEM TANILAMA")
+        for line in get_startup_diagnostics():
+            self._append_log(line)
+        self._append_log("─" * 48)
 
     # ── Callback (thread-safe) ─────────────────────────────────────────────────
     def _bot_callback(self, event, data):
