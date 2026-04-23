@@ -16,7 +16,7 @@ import threading
 import time
 import queue
 import json
-from macro_recorder import MacroRecorder, check_pixels_full
+from macro_recorder import MacroRecorder
 import subprocess
 import sys
 import os
@@ -301,35 +301,14 @@ class RoyaleBot:
         self.scan_h      = tk.IntVar(value=300)
         self.scan_ms     = tk.IntVar(value=1000)        # Tarama aralığı (ms)
 
-        self.move_steps_raw = []   # Artık kullanılmıyor (eski uyumluluk için bırakıldı)
         self.respawn_key    = tk.StringVar(value="y")    # Yeniden başlatma tuşu
         self.respawn_delay  = tk.DoubleVar(value=8.0)  # Respawn sonrası bekleme (s)
         self.auto_hunt_key  = tk.StringVar(value="k")
-
-        self.move_sequence  = []   # Artık kullanılmıyor (eski uyumluluk için bırakıldı)
-        self.wasd_sequence  = []   # Artık kullanılmıyor (mini makro ile değiştirildi)
 
         # ── Hareket Makrosu (respawn → oto-av arası) ──────────────────────────
         self.move_macro_recorder = MacroRecorder()
         self.move_macro_path     = tk.StringVar(value="move_macro.json")
         self.move_macro_speed    = tk.DoubleVar(value=1.0)
-
-        # ── Envanter & Makro sistemi ──────────────────────────────────────────
-        self.inv_check_points = []   # Kontrol edilecek piksel noktaları [(x,y), ...]
-        self.inv_threshold    = tk.IntVar(value=40)   # Parlaklık eşiği
-        self.inv_check_sec    = tk.IntVar(value=30)   # Kontrol aralığı (saniye)
-        self.inv_auto_enabled = tk.BooleanVar(value=False)
-        self.inv_macro_path   = tk.StringVar(value="macro.json")
-        self.inv_speed        = tk.DoubleVar(value=1.0)
-        self._inv_last_t      = 0.0
-        self._inv_running     = False
-        self.macro_recorder   = MacroRecorder()
-
-        # ── Envanter açma & navigasyon tuşları ──────────────────────────────
-        self.inv_open_key    = tk.StringVar(value="i")    # Envanteri açan tuş
-        self.inv_page6_key   = tk.StringVar(value="b")    # 6. sayfaya giden tuş
-        self.inv_open_delay  = tk.DoubleVar(value=1.0)    # Envanter açıldıktan sonra bekleme (s)
-        self.inv_page_delay  = tk.DoubleVar(value=0.5)    # Sayfa geçişi sonrası bekleme (s)
 
         # Ölüm tespiti ayarları
         self.death_texts  = list(DEFAULT_DEATH_TEXTS)
@@ -355,15 +334,6 @@ class RoyaleBot:
                 self._scan_once()
             except Exception as e:
                 self.cb("log", f"⚠️ Hata: {e}")
-            # ── Envanter kontrol ──────────────────────────────────────────
-            if self.inv_auto_enabled.get() and self.inv_check_points:
-                now_t = time.time()
-                if now_t - self._inv_last_t >= self.inv_check_sec.get():
-                    self._inv_last_t = now_t
-                    try:
-                        self._do_inventory_check()
-                    except Exception as e:
-                        self.cb("log", f"⚠️ Envanter kontrol hatası: {e}")
             interval = max(0.2, self.scan_ms.get() / 1000)
             time.sleep(interval)
         self.cb("log", "🔴 Bot durduruldu.")
@@ -511,7 +481,6 @@ class RoyaleBot:
         self.cb("status", "⚔️ Av devam ediyor…")
         self.cb("log", f"✅ [{app_lbl}] Yeniden başlatma tamamlandı.")
 
-    # ── Envanter Kontrol ──────────────────────────────────────────────────────
     def _focus_win(self, win: dict) -> bool:
         """
         Belirtilen pencereyi ön plana alır ve focus'u doğrular.
@@ -554,115 +523,7 @@ class RoyaleBot:
             return active == app_name
         return True  # app_name bilinmiyorsa doğrulama yapılamaz
 
-    def _focus_game_window(self):
-        """Seçili oyun penceresini (ilk pencere) ön plana alır."""
-        if not self.selected_windows or pyautogui is None:
-            return
-        self._focus_win(self.selected_windows[0])
 
-
-
-
-
-    def _do_inventory_check(self):
-        """
-        Envanter kontrol & satış akışı:
-          0. Oyun penceresini ön plana al
-          1. Envanteri aç  (inv_open_key — varsayılan 'i')
-          2. 6. sayfaya git (inv_page6_key — varsayılan 'b')
-          3. Piksel kontrolü
-          4. HER DURUMDA envanteri kapat (inv_open_key)
-          5a. Boşsa → devam et, makro çalışmaz
-          5b. Doluysa → makroyu çalıştır
-        """
-        # ── Guard 1: zaten çalışıyorsa atla ───────────────────────────────
-        if self._inv_running:
-            return
-
-        # ── Guard 2: pyautogui yoksa atla ─────────────────────────────────
-        if pyautogui is None:
-            return
-
-        # ── Guard 3: piksel noktası yoksa KESİNLİKLE çalışma ──────────────
-        if not self.inv_check_points:
-            self.cb("log", "⚠️ Envanter kontrol noktası eklenmemiş — makro atlandı.")
-            return
-
-        # ── Guard 4: makro dosyası belirtilmemişse çalışma ────────────────
-        path = self.inv_macro_path.get().strip()
-        if not path:
-            self.cb("log", "⚠️ Makro dosyası yolu boş — makro atlandı.")
-            return
-
-        self._inv_running = True
-        open_key  = self.inv_open_key.get().strip()  or "i"
-        page_key  = self.inv_page6_key.get().strip() or "b"
-        open_dly  = max(0.3, self.inv_open_delay.get())
-        page_dly  = max(0.2, self.inv_page_delay.get())
-
-        try:
-            # 0) Oyun penceresini ön plana al
-            self.cb("log", "🖥️ Oyun penceresi ön plana alınıyor…")
-            self._focus_game_window()
-
-            # 1) Envanteri aç
-            self.cb("log", f"🎒 Envanter açılıyor ({open_key!r})…")
-            pyautogui.press(open_key, _pause=False)
-            time.sleep(open_dly)
-
-            # 2) 6. sayfaya git
-            self.cb("log", f"📋 6. sayfaya gidiliyor ({page_key!r})…")
-            pyautogui.press(page_key, _pause=False)
-            time.sleep(page_dly)
-
-            # 3) Piksel kontrolü
-            full, results = check_pixels_full(
-                self.inv_check_points, self.inv_threshold.get())
-
-            # 4) HER DURUMDA envanteri kapat
-            self.cb("log", f"🎒 Envanter kapatılıyor ({open_key!r})…")
-            pyautogui.press(open_key, _pause=False)
-            time.sleep(0.4)   # kapanması için bekle
-
-            # 5) Pixel okuma başarısız → güvenli çık
-            if not results:
-                self.cb("log", "⚠️ Piksel okunamadı — makro atlandı.")
-                return
-
-            # 6a) 6. sayfa dolmamış → devam et
-            if not full:
-                self.cb("log", "✅ 6. sayfa henüz dolmamış — makro atlandı.")
-                return
-
-            # 6b) 6. sayfa DOLU → makroyu çalıştır
-            occupied = sum(1 for *_, bri in results
-                           if bri > self.inv_threshold.get())
-            self.cb("log",
-                    f"🎒 6. sayfa DOLU ({occupied}/{len(results)} slot) "
-                    f"— satış makrosu başlatılıyor…")
-            self.cb("status", "🎒 Satış Yapılıyor…")
-
-            if not os.path.exists(path):
-                self.cb("log", f"⚠️ Makro dosyası bulunamadı: {path}")
-                return
-
-            self.macro_recorder.load(path)
-            n = len(self.macro_recorder.events)
-            self.cb("log",
-                    f"▶ {n} olaylı makro oynatılıyor "
-                    f"(×{self.inv_speed.get():.2f})…")
-            self.macro_recorder.play(
-                speed=self.inv_speed.get(),
-                log_cb=lambda m: self.cb("log", m),
-                stop_check=lambda: not self.running,
-            )
-            self.cb("log", "✅ Satış makrosu tamamlandı — oto-ava devam…")
-            self.cb("status", "⚔️ Av devam ediyor…")
-
-        except Exception as e:
-            self.cb("log", f"❌ Envanter kontrol hatası: {e}")
-        finally:
-            self._inv_running = False
 
 
 
@@ -783,16 +644,13 @@ class App(tk.Tk):
         tab1 = tk.Frame(nb, bg=BG)
         tab2 = tk.Frame(nb, bg=BG)
         tab3 = tk.Frame(nb, bg=BG)
-        tab4 = tk.Frame(nb, bg=BG)
         nb.add(tab1, text=" 🔍 Tarama Bölgesi ")
         nb.add(tab2, text=" ⌨️ Tuşlar & Hedef ")
         nb.add(tab3, text=" 📋 Log ")
-        nb.add(tab4, text=" 🎒 Envanter & Makro ")
 
         self._build_scan_tab(tab1)
         self._build_key_tab(tab2)
         self._build_log_tab(tab3)
-        self._build_inventory_tab(tab4)
 
     def _stat_card(self, parent, label, var, color):
         f = tk.Frame(parent, bg=SURFACE, padx=20, pady=8, relief="flat")
@@ -1483,310 +1341,6 @@ class App(tk.Tk):
         self.log_text.config(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.config(state="disabled")
-
-    def _build_inventory_tab(self, parent):
-        outer = tk.Frame(parent, bg=BG)
-        outer.pack(fill="both", expand=True)
-
-        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
-        vsb    = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-        pad = tk.Frame(canvas, bg=BG, padx=16, pady=12)
-        canvas.create_window((0, 0), window=pad, anchor="nw")
-        pad.bind("<Configure>", lambda e: canvas.configure(
-            scrollregion=canvas.bbox("all")))
-
-        # ── Başlık ──────────────────────────────────────────────────────────
-        tk.Label(pad, text="🎒  Envanter Doluluk Kontrolü & Makro Sistemi",
-                 font=(FONT[0], 13, "bold"), bg=BG, fg=GOLD).pack(anchor="w")
-        tk.Label(pad,
-                 text="Piksel rengiyle envanter dolu mu diye kontrol eder; doluysa kaydedilen makroyu oynatır.",
-                 font=FONT_SM, bg=BG, fg=FG_DIM).pack(anchor="w", pady=(2, 10))
-
-        # ══════════════════════════════════════════════════════════════════
-        # BÖLÜM 1 — Piksel Noktaları
-        # ══════════════════════════════════════════════════════════════════
-        sec1 = tk.Frame(pad, bg=SURFACE, padx=12, pady=10)
-        sec1.pack(fill="x", pady=(0, 10))
-        tk.Label(sec1, text="📍  Kontrol Pikselleri",
-                 font=(FONT[0], 11, "bold"), bg=SURFACE, fg=INFO).pack(anchor="w")
-        tk.Label(sec1,
-                 text="Envanterin 6. sayfasında dolu slot içindeki piksel koordinatlarını ekle.\n"
-                      "Bot bu noktaları kontrol eder; %80'i parlaksa → envanter DOLU sayar.",
-                 font=(FONT[0], 9), bg=SURFACE, fg=FG_DIM, justify="left").pack(anchor="w", pady=(2, 6))
-
-        self.pixel_list_frame = tk.Frame(sec1, bg=SURFACE)
-        self.pixel_list_frame.pack(fill="x")
-        self._refresh_pixel_list()
-
-        pbf = tk.Frame(sec1, bg=SURFACE)
-        pbf.pack(anchor="w", pady=(6, 0))
-        make_btn(pbf, text="➕ 3s sonra piksel ekle",
-                 bg=ACCENT2, fg="black", active_bg="#1e5a9a",
-                 padx=10, pady=4, command=self._add_pixel_point).pack(side="left")
-        make_btn(pbf, text="🔬 Anlık Test",
-                 bg="#2a5a3a", fg="black", active_bg="#356a4a",
-                 padx=10, pady=4, command=self._test_inventory).pack(side="left", padx=(8, 0))
-        make_btn(pbf, text="🗑 Temizle",
-                 bg=DANGER, fg="black", active_bg="#b91c1c",
-                 padx=10, pady=4, command=self._clear_pixels).pack(side="left", padx=(8, 0))
-
-        # Parlaklık eşiği
-        thr_f = tk.Frame(sec1, bg=SURFACE)
-        thr_f.pack(anchor="w", pady=(8, 0))
-        tk.Label(thr_f, text="Parlaklık Eşiği:", font=FONT_SM, bg=SURFACE, fg=FG_DIM).pack(side="left")
-        tk.Scale(thr_f, from_=10, to=200, resolution=5, orient="horizontal",
-                 variable=self.bot.inv_threshold,
-                 bg=SURFACE, fg=FG, troughcolor=BG, highlightthickness=0,
-                 activebackground=ACCENT, sliderrelief="flat", length=150).pack(side="left", padx=6)
-        tk.Label(thr_f, textvariable=self.bot.inv_threshold,
-                 font=(FONT[0], 10, "bold"), bg=SURFACE, fg=ACCENT).pack(side="left")
-        tk.Label(thr_f, text="  (boş slot siyah ≈ 0–30, dolu slot renkli > 40)",
-                 font=(FONT[0], 9), bg=SURFACE, fg=FG_DIM).pack(side="left")
-
-        # ══════════════════════════════════════════════════════════════════
-        # BÖLÜM 2 — Makro Kaydı
-        # ══════════════════════════════════════════════════════════════════
-        sec2 = tk.Frame(pad, bg=SURFACE, padx=12, pady=10)
-        sec2.pack(fill="x", pady=(0, 10))
-        tk.Label(sec2, text="🎬  Makro Kaydı",
-                 font=(FONT[0], 11, "bold"), bg=SURFACE, fg=INFO).pack(anchor="w")
-        tk.Label(sec2,
-                 text="'Kaydı Başlat'a bas → oyunda ne yapman gerekiyorsa yap → 'Durdur & Kaydet'e bas.",
-                 font=(FONT[0], 9), bg=SURFACE, fg=FG_DIM).pack(anchor="w", pady=(2, 6))
-
-        # Dosya yolu
-        pf = tk.Frame(sec2, bg=SURFACE)
-        pf.pack(anchor="w", pady=(0, 6))
-        tk.Label(pf, text="Kayıt dosyası:", font=FONT_SM, bg=SURFACE, fg=FG_DIM).pack(side="left")
-        tk.Entry(pf, textvariable=self.bot.inv_macro_path, width=30,
-                 bg=BG, fg=FG, insertbackground=FG, relief="flat",
-                 font=FONT_SM).pack(side="left", padx=6)
-
-        # Kayıt durumu + sayaç
-        self.rec_status_var = tk.StringVar(value="⏸️  Kayıt Yok")
-        self.rec_count_var  = tk.StringVar(value="0 olay")
-        sf = tk.Frame(sec2, bg=SURFACE)
-        sf.pack(anchor="w", pady=(0, 4))
-        tk.Label(sf, textvariable=self.rec_status_var,
-                 font=(FONT[0], 11, "bold"), bg=SURFACE, fg=GOLD).pack(side="left")
-        tk.Label(sf, textvariable=self.rec_count_var,
-                 font=FONT_SM, bg=SURFACE, fg=FG_DIM).pack(side="left", padx=(12, 0))
-
-        # Kayıt butonları
-        rbf = tk.Frame(sec2, bg=SURFACE)
-        rbf.pack(anchor="w")
-        self.rec_btn = make_btn(rbf, text="🔴  Kaydı Başlat",
-                                bg=ACCENT, fg="black", active_bg="#c41040",
-                                padx=14, pady=6, command=self._start_macro_rec)
-        self.rec_btn.pack(side="left")
-        self.stop_rec_btn = make_btn(rbf, text="⏹  Durdur & Kaydet",
-                                     bg="#2a3a5a", fg="black", active_bg="#354a70",
-                                     padx=14, pady=6, command=self._stop_macro_rec,
-                                     state="disabled")
-        self.stop_rec_btn.pack(side="left", padx=(8, 0))
-        make_btn(rbf, text="▶  Makroyu Test Et",
-                 bg="#2a5a3a", fg="black", active_bg="#356a4a",
-                 padx=14, pady=6, command=self._test_macro).pack(side="left", padx=(8, 0))
-
-        # ══════════════════════════════════════════════════════════════════
-        # BÖLÜM 3 — Otomasyon Ayarları
-        # ══════════════════════════════════════════════════════════════════
-        sec3 = tk.Frame(pad, bg=SURFACE, padx=12, pady=10)
-        sec3.pack(fill="x")
-        tk.Label(sec3, text="⚙️  Otomasyon Ayarları",
-                 font=(FONT[0], 11, "bold"), bg=SURFACE, fg=INFO).pack(anchor="w")
-        tk.Label(sec3,
-                 text="Bot her kontrolde sırasıyla: Envanter aç → 6. sayfaya git → Piksel kontrol → Dolu ise makroyu çalıştır.",
-                 font=(FONT[0], 9), bg=SURFACE, fg=FG_DIM, justify="left").pack(anchor="w", pady=(2, 8))
-
-        tk.Checkbutton(sec3,
-                       text="  Envanter dolduğunda makroyu OTOMATIK çalıştır",
-                       variable=self.bot.inv_auto_enabled,
-                       bg=SURFACE, fg=FG, selectcolor=BG, activebackground=SURFACE,
-                       font=(FONT[0], 11, "bold")).pack(anchor="w", pady=(0, 10))
-
-        # ── Tuş ve gecikme ayarları ──────────────────────────────────────
-        keys_f = tk.Frame(sec3, bg=SURFACE)
-        keys_f.pack(anchor="w", pady=(0, 8))
-
-        # Envanter aç tuşu
-        tk.Label(keys_f, text="Envanter Tuşu:",
-                 font=FONT_SM, bg=SURFACE, fg=FG_DIM).grid(row=0, column=0, sticky="w", padx=(0,6), pady=3)
-        tk.Entry(keys_f, textvariable=self.bot.inv_open_key, width=4,
-                 bg=BG, fg=FG, insertbackground=FG, relief="flat",
-                 font=(FONT[0], 12, "bold"), justify="center").grid(row=0, column=1, sticky="w", padx=(0,20))
-        tk.Label(keys_f, text="(varsayılan: i — envanteri açar/kapatır)",
-                 font=(FONT[0], 9), bg=SURFACE, fg=FG_DIM).grid(row=0, column=2, sticky="w")
-
-        # 6. sayfaya git tuşu
-        tk.Label(keys_f, text="6. Sayfa Tuşu:",
-                 font=FONT_SM, bg=SURFACE, fg=FG_DIM).grid(row=1, column=0, sticky="w", padx=(0,6), pady=3)
-        tk.Entry(keys_f, textvariable=self.bot.inv_page6_key, width=4,
-                 bg=BG, fg=FG, insertbackground=FG, relief="flat",
-                 font=(FONT[0], 12, "bold"), justify="center").grid(row=1, column=1, sticky="w", padx=(0,20))
-        tk.Label(keys_f, text="(varsayılan: b — oyun içi kısayol ataması)",
-                 font=(FONT[0], 9), bg=SURFACE, fg=FG_DIM).grid(row=1, column=2, sticky="w")
-
-        # Envanter açılma gecikmesi
-        tk.Label(keys_f, text="Envanter Açılma Gecikmesi:",
-                 font=FONT_SM, bg=SURFACE, fg=FG_DIM).grid(row=2, column=0, sticky="w", padx=(0,6), pady=3)
-        delay_f1 = tk.Frame(keys_f, bg=SURFACE)
-        delay_f1.grid(row=2, column=1, columnspan=2, sticky="w")
-        tk.Scale(delay_f1, from_=0.3, to=3.0, resolution=0.1, orient="horizontal",
-                 variable=self.bot.inv_open_delay,
-                 bg=SURFACE, fg=FG, troughcolor=BG, highlightthickness=0,
-                 activebackground=ACCENT, sliderrelief="flat", length=140, digits=2).pack(side="left")
-        tk.Label(delay_f1, textvariable=self.bot.inv_open_delay,
-                 font=(FONT[0], 10, "bold"), bg=SURFACE, fg=ACCENT).pack(side="left", padx=4)
-        tk.Label(delay_f1, text="sn", font=FONT_SM, bg=SURFACE, fg=FG_DIM).pack(side="left")
-
-        # Sayfa geçiş gecikmesi
-        tk.Label(keys_f, text="Sayfa Geçiş Gecikmesi:",
-                 font=FONT_SM, bg=SURFACE, fg=FG_DIM).grid(row=3, column=0, sticky="w", padx=(0,6), pady=3)
-        delay_f2 = tk.Frame(keys_f, bg=SURFACE)
-        delay_f2.grid(row=3, column=1, columnspan=2, sticky="w")
-        tk.Scale(delay_f2, from_=0.2, to=2.0, resolution=0.1, orient="horizontal",
-                 variable=self.bot.inv_page_delay,
-                 bg=SURFACE, fg=FG, troughcolor=BG, highlightthickness=0,
-                 activebackground=ACCENT, sliderrelief="flat", length=140, digits=2).pack(side="left")
-        tk.Label(delay_f2, textvariable=self.bot.inv_page_delay,
-                 font=(FONT[0], 10, "bold"), bg=SURFACE, fg=ACCENT).pack(side="left", padx=4)
-        tk.Label(delay_f2, text="sn", font=FONT_SM, bg=SURFACE, fg=FG_DIM).pack(side="left")
-
-        # ── Kontrol aralığı ─────────────────────────────────────────────
-        r1 = tk.Frame(sec3, bg=SURFACE)
-        r1.pack(anchor="w", pady=(0, 4))
-        tk.Label(r1, text="Kontrol Aralığı:", font=FONT_SM, bg=SURFACE, fg=FG_DIM).pack(side="left")
-        tk.Scale(r1, from_=5, to=120, resolution=5, orient="horizontal",
-                 variable=self.bot.inv_check_sec,
-                 bg=SURFACE, fg=FG, troughcolor=BG, highlightthickness=0,
-                 activebackground=ACCENT, sliderrelief="flat", length=150).pack(side="left", padx=6)
-        tk.Label(r1, textvariable=self.bot.inv_check_sec,
-                 font=(FONT[0], 10, "bold"), bg=SURFACE, fg=ACCENT).pack(side="left")
-        tk.Label(r1, text="sn", font=FONT_SM, bg=SURFACE, fg=FG_DIM).pack(side="left", padx=2)
-
-        r2 = tk.Frame(sec3, bg=SURFACE)
-        r2.pack(anchor="w")
-        tk.Label(r2, text="Oynatma Hızı: ", font=FONT_SM, bg=SURFACE, fg=FG_DIM).pack(side="left")
-        tk.Scale(r2, from_=0.25, to=3.0, resolution=0.25, orient="horizontal",
-                 variable=self.bot.inv_speed,
-                 bg=SURFACE, fg=FG, troughcolor=BG, highlightthickness=0,
-                 activebackground=ACCENT, sliderrelief="flat", length=150, digits=3).pack(side="left", padx=6)
-        tk.Label(r2, textvariable=self.bot.inv_speed,
-                 font=(FONT[0], 10, "bold"), bg=SURFACE, fg=ACCENT).pack(side="left")
-        tk.Label(r2, text="× hız  (1.0 = gerçek süre, 2.0 = 2× hızlı)",
-                 font=(FONT[0], 9), bg=SURFACE, fg=FG_DIM).pack(side="left", padx=6)
-
-    # ── Piksel yönetim metodları ──────────────────────────────────────────────
-    def _refresh_pixel_list(self):
-        for w in self.pixel_list_frame.winfo_children():
-            w.destroy()
-        if not self.bot.inv_check_points:
-            tk.Label(self.pixel_list_frame, text="  Henüz piksel eklenmedi…",
-                     font=(FONT[0], 9), bg=SURFACE, fg=FG_DIM).pack(anchor="w")
-            return
-        _, pixel_data = check_pixels_full(
-            self.bot.inv_check_points, self.bot.inv_threshold.get())
-        for i, (px, py, r, g, b, bri) in enumerate(pixel_data):
-            row = tk.Frame(self.pixel_list_frame, bg=BG, padx=6, pady=2)
-            row.pack(fill="x", pady=1)
-            hex_c = f"#{r:02x}{g:02x}{b:02x}"
-            tk.Label(row, text="  ", bg=hex_c, width=2).pack(side="left", padx=(0, 6))
-            status = "🟢 DOLU" if bri > self.bot.inv_threshold.get() else "⚫ Boş"
-            tk.Label(row,
-                     text=f"{i+1}. ({px},{py})   RGB=({r},{g},{b})   Parlaklık={bri}  {status}",
-                     font=(FONT[0], 9), bg=BG, fg=INFO).pack(side="left", fill="x", expand=True)
-            make_btn(row, text="✕", bg=DANGER, fg="black", active_bg="#b91c1c",
-                     padx=4, pady=1,
-                     command=lambda idx=i: self._remove_pixel(idx)).pack(side="right")
-
-    def _remove_pixel(self, idx):
-        if 0 <= idx < len(self.bot.inv_check_points):
-            self.bot.inv_check_points.pop(idx)
-        self._refresh_pixel_list()
-
-    def _clear_pixels(self):
-        self.bot.inv_check_points.clear()
-        self._refresh_pixel_list()
-
-    def _add_pixel_point(self):
-        def capture():
-            for i in (3, 2, 1):
-                self._bot_callback("log", f"⏱️ {i}… (mouse'u kontrol edilecek slota götür)")
-                time.sleep(1)
-            x, y = pyautogui.position()
-            self.bot.inv_check_points.append((x, y))
-            self._bot_callback("log", f"📍 Piksel eklendi: ({x}, {y})")
-            self._refresh_pixel_list()
-        threading.Thread(target=capture, daemon=True).start()
-
-    def _test_inventory(self):
-        def run():
-            full, results = check_pixels_full(
-                self.bot.inv_check_points, self.bot.inv_threshold.get())
-            bright = sum(1 for *_, bri in results if bri > self.bot.inv_threshold.get())
-            self._bot_callback(
-                "log",
-                f"🎒 Envanter: {'🔴 DOLU' if full else '🟢 Boş'}  "
-                f"({bright}/{len(results)} piksel dolu, eşik={self.bot.inv_threshold.get()})")
-            self._refresh_pixel_list()
-        threading.Thread(target=run, daemon=True).start()
-
-    # ── Makro kayıt metodları ─────────────────────────────────────────────────
-    def _start_macro_rec(self):
-        try:
-            self.bot.macro_recorder.start_recording()
-            self.rec_btn.config(state="disabled")
-            self.stop_rec_btn.config(state="normal")
-            self.rec_status_var.set("🔴  Kayıt Devam Ediyor…")
-            self._bot_callback("log", "🔴 Makro kaydı başladı — oyunda hareketlerini yap!")
-            self._update_rec_count()
-        except Exception as e:
-            messagebox.showerror("Kayıt Hatası", str(e))
-
-    def _update_rec_count(self):
-        if self.bot.macro_recorder.recording:
-            n = len(self.bot.macro_recorder.events)
-            self.rec_count_var.set(f"{n} olay kaydedildi")
-            self.after(500, self._update_rec_count)
-
-    def _stop_macro_rec(self):
-        self.bot.macro_recorder.stop_recording()
-        self.rec_btn.config(state="normal")
-        self.stop_rec_btn.config(state="disabled")
-        n = len(self.bot.macro_recorder.events)
-        self.rec_status_var.set(f"✅  Kayıt Tamamlandı — {n} olay")
-        self.rec_count_var.set(f"{n} olay")
-        path = self.bot.inv_macro_path.get()
-        try:
-            self.bot.macro_recorder.save(path)
-            self._bot_callback("log", f"💾 Makro kaydedildi: {path}  ({n} olay)")
-        except Exception as e:
-            messagebox.showerror("Kayıt Hatası", str(e))
-
-    def _test_macro(self):
-        path = self.bot.inv_macro_path.get()
-        if not os.path.exists(path):
-            messagebox.showwarning("Dosya Yok", f"Makro dosyası bulunamadı:\n{path}")
-            return
-        def run():
-            try:
-                self.bot.macro_recorder.load(path)
-                n = len(self.bot.macro_recorder.events)
-                self._bot_callback("log", f"▶ Makro test oynatılıyor ({n} olay)…")
-                self.bot.macro_recorder.play(
-                    speed=self.bot.inv_speed.get(),
-                    log_cb=lambda m: self._bot_callback("log", m),
-                    stop_check=lambda: False,
-                )
-                self._bot_callback("log", "✅ Makro testi tamamlandı.")
-            except Exception as e:
-                self._bot_callback("log", f"❌ Makro hatası: {e}")
-        threading.Thread(target=run, daemon=True).start()
 
     # ── Kontrol butonları ─────────────────────────────────────────────────────
     def _toggle(self):

@@ -314,29 +314,3 @@ class MacroRecorder:
                 if log_cb:
                     log_cb(f"⚠️ [{etype}] oynatma hatası: {ex}")
 
-
-# ── Piksel kontrolü (envanter doluluk tespiti) ────────────────────────────────
-def check_pixels_full(check_points, threshold: int = 40):
-    """
-    Verilen piksel koordinatlarının parlaklığını kontrol eder.
-    Dönüş: (envanter_dolu_mu: bool, [(x, y, r, g, b, brightness), ...])
-    """
-    if not check_points or ImageGrab is None:
-        return False, []
-
-    results  = []
-    occupied = 0
-    for (x, y) in check_points:
-        try:
-            img        = ImageGrab.grab(bbox=(x, y, x + 2, y + 2))
-            pix        = img.getpixel((0, 0))
-            r, g, b    = int(pix[0]), int(pix[1]), int(pix[2])
-            brightness = (r + g + b) // 3
-            if brightness > threshold:
-                occupied += 1
-            results.append((x, y, r, g, b, brightness))
-        except Exception:
-            results.append((x, y, 0, 0, 0, 0))
-
-    required = max(1, round(len(check_points) * 0.8))
-    return occupied >= required, results
