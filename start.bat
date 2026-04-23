@@ -3,23 +3,29 @@ title Royale Online Bot — Launcher
 color 0A
 
 echo.
-echo  ╔══════════════════════════════════════════╗
-echo  ║     Royale Online — Oto-Av Botu          ║
-echo  ║     github.com/codewithgokay/ROYALEONLINE ║
-echo  ╚══════════════════════════════════════════╝
+echo  ===========================================
+echo   Royale Online -- Oto-Av Botu
+echo   github.com/codewithgokay/ROYALEONLINE
+echo  ===========================================
 echo.
 
 :: ── Python kontrolü ──────────────────────────────────────────────────────────
 python --version >nul 2>&1
 if errorlevel 1 (
     echo  [HATA] Python bulunamadi!
-    echo  Lutfen https://www.python.org/downloads/ adresinden Python 3.10+ yukleyin.
-    echo  Kurulum sirasinda "Add Python to PATH" secenegini isaretleyin!
+    echo.
+    echo  Cozum: https://www.python.org/downloads/
+    echo  Kurulumda "Add Python to PATH" secenegini isaretleyin!
+    echo.
     pause
     exit /b 1
 )
 
-:: ── Sanal ortam olustur (ilk calistirmada) ───────────────────────────────────
+echo  [OK] Python bulundu:
+python --version
+echo.
+
+:: ── Sanal ortam ──────────────────────────────────────────────────────────────
 if not exist ".venv\" (
     echo  [1/3] Sanal ortam olusturuluyor...
     python -m venv .venv
@@ -32,43 +38,81 @@ if not exist ".venv\" (
     echo.
 )
 
-:: ── Bağımlılıkları yükle ─────────────────────────────────────────────────────
-echo  [2/3] Gerekli kutuphaneler kontrol ediliyor / yukleniyor...
-.venv\Scripts\pip install -q --upgrade pip
-.venv\Scripts\pip install -q -r requirements.txt
-if errorlevel 1 (
-    echo  [HATA] Kutuphaneler yuklenemedi. requirements.txt dosyasini kontrol edin.
-    pause
-    exit /b 1
-)
-echo  [OK] Tum kutuphaneler hazir.
+:: ── Pip güncelle ─────────────────────────────────────────────────────────────
+echo  [2/3] pip guncelleniyor...
+.venv\Scripts\python -m pip install --upgrade pip --quiet
+echo  [OK] pip guncellendi.
 echo.
 
+:: ── Paketleri teker teker yükle (hangisi hata verirse belli olsun) ────────────
+echo  [3/3] Gerekli paketler yukleniyor...
+echo.
+
+set FAILED=0
+
+call :install_pkg "pillow>=9.0.0"
+call :install_pkg "pytesseract>=0.3.10"
+call :install_pkg "pyautogui>=0.9.50"
+call :install_pkg "pynput>=1.7.0"
+call :install_pkg "mss>=6.1.0"
+call :install_pkg "pygetwindow>=0.0.9"
+
+if %FAILED%==1 (
+    echo.
+    echo  ============================================
+    echo   BAZI PAKETLER YUKLENEMEDI (yukarda gorun)
+    echo   Bot yine de calisabilir, devam ediliyor...
+    echo  ============================================
+    echo.
+    timeout /t 4 /nobreak >nul
+)
+
 :: ── Tesseract kontrolü ───────────────────────────────────────────────────────
+echo.
 if not exist "C:\Program Files\Tesseract-OCR\tesseract.exe" (
     if not exist "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe" (
         echo  [UYARI] Tesseract bulunamadi!
-        echo  OCR ozelligi icin Tesseract yukleyin:
+        echo.
+        echo  OCR olmadan olum ekrani TANINAMAZ.
+        echo  Tesseract'i buradan indir (kurulumda "Turkish" sec):
         echo  https://github.com/UB-Mannheim/tesseract/wiki
         echo.
-        echo  Tesseract olmadan bot calisir ama olum ekrani TANINAMAZ.
-        echo.
-        choice /C YN /M "  Tesseract olmadan devam etmek istiyor musun?"
+        choice /C YN /M "  Tesseract olmadan yine de devam et?"
         if errorlevel 2 (
             start https://github.com/UB-Mannheim/tesseract/wiki
             pause
             exit /b 0
         )
+    ) else (
+        echo  [OK] Tesseract bulundu (x86).
     )
+) else (
+    echo  [OK] Tesseract bulundu.
 )
 
 :: ── Botu başlat ──────────────────────────────────────────────────────────────
-echo  [3/3] Bot baslatiliyor...
+echo.
+echo  Bot baslatiliyor...
 echo.
 .venv\Scripts\python royale_bot.py
 
 if errorlevel 1 (
     echo.
     echo  [HATA] Bot beklenmedik sekilde kapandi.
+    echo  Hata mesajini yukarda inceleyin.
     pause
 )
+goto :eof
+
+:: ── Yardımcı fonksiyon ───────────────────────────────────────────────────────
+:install_pkg
+set PKG=%~1
+echo    Yukleniyor: %PKG%
+.venv\Scripts\pip install "%PKG%" --quiet
+if errorlevel 1 (
+    echo    [HATA] Yuklenemedi: %PKG%
+    set FAILED=1
+) else (
+    echo    [OK] %PKG%
+)
+goto :eof
